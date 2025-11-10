@@ -1,0 +1,88 @@
+# packages
+library(tidyverse)
+library(here)
+library(sf)
+library(janitor)
+library(tmap)
+
+# read
+report <- read_csv(here::here("Report_Card_Assessment_Data_2018-19_School_Year_20251013.csv"),
+                   na= "NULL")
+
+shape <- st_read("C:/Users/Elliot/Desktop/05GIS/week2/3/homework wk2/Washington_Counties_with_Natural_Shoreline___washsh_area/Washington_Counties_with_Natural_Shoreline___washsh_area.shp")
+
+#检查数据
+Datatypelist <- report %>% 
+  summarise_all(class) %>%
+  pivot_longer(everything(), 
+               names_to="All_variables", 
+               values_to="Variable_class")
+Datatypelist
+
+#清洗数据
+#起点
+report_clean <- report %>%
+#清理列名，将列名全部转换为小写字母，并用下划线 _ 替代空格或特殊符号  
+  clean_names() %>%
+#选择需要的列  
+  select(
+    county, organization_level, test_subject,
+    count_met_standard, count_of_students_expected_to_test, grade_level
+  ) %>%
+#筛除汇总行（Multiple）
+  filter(county != "Multiple") %>%
+#筛选学校层级
+  filter(organization_level == "School") %>%
+#筛选科目：科学
+  filter(test_subject == "Science") %>%
+#筛选年级层次
+  filter(grade_level == "All Grades") %>%
+#按县分组
+  group_by(county) %>%
+#删除缺失值
+  na.omit() %>%
+#汇总每个县的总人数
+  summarise(
+    total_county_met_standard = sum(count_met_standard),
+    total_county_to_test = sum(count_of_students_expected_to_test)
+  ) %>%
+#计算百分比
+  mutate(percent_met_per_county = 
+           (total_county_met_standard / total_county_to_test) * 100)
+
+#We now have the percent that me from the counties and and need to work out what the state average is....
+state_average <- report_clean%>%
+  summarise(state_average= mean(percent_met_per_county))%>%
+  pull()
+
+#Ok, now we need to make a column that compares each county value to the state average and some text to say if it is above or below...
+county_only_above_below_state <- report_clean %>%
+  mutate(difference_to_state=(percent_met_per_county-state_average))%>%
+  mutate(across(difference_to_state, ~ round(.x, 0)))%>%
+  mutate(above_below = case_when(difference_to_state<0 ~ "below",
+                                 difference_to_state>0 ~ "above",
+                                 difference_to_state==0 ~ "equal"
+  ))
+#Join to our spatial data....
+joined_data <- shape %>% 
+  clean_names(.) %>%
+  left_join(., 
+            county_only_above_below_state,
+            by = c("countylabe" = "county"))
+#画图
+#bbox_county <- joined_data %>%
+#  st_bbox(.) %>% 
+#  tmaptools::read_osm(., type = "osm", zoom = NULL)
+
+#tm_shape(bbox_county)+
+#  tm_rgb()+
+
+tm_shape(joined_data) + 
+  tm_polygons(fill="above_below",
+              fill.scale = tm_scale_categorical(
+                values="brewer.bu_pu"),
+              fill_alpha=0.5)+
+  tm_compass(position = c("left", "bottom"),type = "arrow")+
+  tm_scalebar(position = c("left", "bottom")) +
+  tm_title_out("Counties above or below state avearge for science in all grades", 
+               position=tm_pos_out("center", "top"))
