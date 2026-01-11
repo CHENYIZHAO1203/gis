@@ -1,0 +1,574 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>c&#10084;p 7th anniversary</title>
+  <style>
+    html, body {
+      margin:0; padding:0; width:100%; height:100%;
+      background:#000; overflow:hidden;
+      -webkit-tap-highlight-color: transparent;
+      touch-action: manipulation;
+      user-select:none;
+      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Hiragino Sans GB","Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif;
+    }
+    canvas { display:block; width:100vw; height:100vh; }
+
+    #hint{
+      position:fixed; left:50%;
+      top:max(14px, env(safe-area-inset-top));
+      transform:translateX(-50%);
+      padding:8px 12px;
+      border:1px solid rgba(255,255,255,0.18);
+      border-radius:999px;
+      background:rgba(0,0,0,0.28);
+      color:rgba(255,255,255,0.78);
+      font-size:13px;
+      z-index:10;
+      pointer-events:none;
+      white-space:nowrap;
+      opacity:1;
+      transition:opacity 600ms ease;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+    }
+    #hint.hide{ opacity:0; }
+
+    #danmaku{ position:fixed; inset:0; pointer-events:none; overflow:hidden; z-index:20; }
+    .dm{
+      position:absolute;
+      right:-120%;
+      white-space:nowrap;
+      will-change:transform;
+      font-weight:800;
+      letter-spacing:0.4px;
+      opacity:0.92;
+      text-shadow: 0 0 10px rgba(255,255,255,0.25);
+      transform: translateX(0);
+    }
+  </style>
+</head>
+<body>
+  <div id="hint">轻触加烟花 · 双击/长按重来 · 结尾弹幕：c&#10084;p 7th anniversary！</div>
+  <canvas id="c"></canvas>
+  <div id="danmaku"></div>
+
+<script>
+/* ====== RAF polyfill ====== */
+(function() {
+  var lastTime = 0;
+  var vendors = ['ms','moz','webkit','o'];
+  for (var x = 0; x < vendors.length && !window.requestAnimationFrame; ++x) {
+    window.requestAnimationFrame = window[vendors[x]+'RequestAnimationFrame'];
+    window.cancelAnimationFrame = window[vendors[x]+'CancelAnimationFrame'] ||
+                                  window[vendors[x]+'CancelRequestAnimationFrame'];
+  }
+  if (!window.requestAnimationFrame) {
+    window.requestAnimationFrame = function(callback) {
+      var currTime = new Date().getTime();
+      var timeToCall = Math.max(0, 16 - (currTime - lastTime));
+      var id = window.setTimeout(function(){ callback(currTime + timeToCall); }, timeToCall);
+      lastTime = currTime + timeToCall;
+      return id;
+    };
+  }
+  if (!window.cancelAnimationFrame) {
+    window.cancelAnimationFrame = function(id){ clearTimeout(id); };
+  }
+})();
+
+(function(){
+  var canvas = document.getElementById('c');
+  var ctx;
+  try { ctx = canvas.getContext('2d', { alpha:false }); }
+  catch(e){ ctx = canvas.getContext('2d'); }
+
+  var hint = document.getElementById('hint');
+  var danmaku = document.getElementById('danmaku');
+
+  function nowMs(){
+    if (window.performance && performance.now) return performance.now();
+    return new Date().getTime();
+  }
+
+  /* =========================
+     参数区（你想微调就改这里）
+     ========================= */
+  var SHOW_MS   = 11000;   // 主烟花时长
+  var FINALE_MS = 2000;     // 终章连发时长（更短，衔接更紧）
+  var DANMAKU_DELAY_MS = 150; // 终章结束到弹幕出现的延迟（更短）
+
+  // ✅ “射击速度太快”主要来自这里：调小就慢
+  var AUTO_RATE = 0.10;   // 自动发射频率（更慢但依然满屏靠齐射+高空分布）
+  var TRAIL_ALPHA = 0.20;  // 拖尾清屏力度（越大越干净，不会白一坨）
+
+  var GRAVITY = 0.085;
+  var AIR_DRAG = 0.985;
+  var SPARK_DRAG = 0.985;
+
+  var DPR_CAP = 2.0;
+  var MAX_SPARKS = 4400;
+
+  // ✅ 弹幕内容：显示真正的 ❤
+  var MESSAGE = 'c\u2764p 7th anniversary！';
+
+  /* ====== 画布适配（处理 iOS 地址栏变化） ====== */
+  var W=0, H=0, DPR=1;
+  function getVH(){
+    if (window.visualViewport && window.visualViewport.height) return window.visualViewport.height;
+    return window.innerHeight;
+  }
+  function resize(){
+    DPR = Math.max(1, Math.min(DPR_CAP, window.devicePixelRatio || 1));
+    var vw = window.innerWidth;
+    var vh = getVH();
+    W = Math.floor(vw * DPR);
+    H = Math.floor(vh * DPR);
+    canvas.width = W;
+    canvas.height = H;
+    canvas.style.width = vw + 'px';
+    canvas.style.height = vh + 'px';
+    ctx.fillStyle = 'rgb(0,0,0)';
+    ctx.fillRect(0,0,W,H);
+  }
+  window.addEventListener('resize', resize, {passive:true});
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', resize, {passive:true});
+  resize();
+
+  function rand(a,b){ return a + Math.random()*(b-a); }
+  function pick(arr){ return arr[(Math.random()*arr.length)|0]; }
+
+  function randomColor(){
+    // 干净鲜艳，但避免过亮导致“白团”
+    var hues = [0,18,35,55,120,155,190,210,240,280,315,330,350];
+    var h = pick(hues) + rand(-8,8);
+    var s = rand(82, 100);
+    var l = rand(50, 64);
+    return {h:h, s:s, l:l};
+  }
+  function hslCss(c,a){ return 'hsla(' + c.h + ',' + c.s + '%,' + c.l + '%,' + a + ')'; }
+
+  /* ====== 顶部覆盖关键：爆点高度分布（强偏向顶部） ====== */
+  function chooseTy(){
+    var r = Math.random();
+    // 65% 超高空：填满顶部空白
+    if (r < 0.65) return rand(H * 0.02, H * 0.16);
+    // 25% 中高空：填满上半屏
+    if (r < 0.90) return rand(H * 0.08, H * 0.28);
+    // 10% 中空：避免所有都挤在最顶端
+    return rand(H * 0.18, H * 0.40);
+  }
+
+  /* ====== 粒子系统（保持最开始风格：不使用 lighter，不做泛光） ====== */
+  var rockets = [];
+  var sparks = [];
+
+  function Rocket(x,y,tx,ty,mode){
+    this.x=x; this.y=y;
+    this.tx=tx; this.ty=ty;
+
+    this.vx = (tx-x) * rand(0.006, 0.012);
+
+    // ✅ 火箭上升速度更克制（比之前慢），但仍能上到高空
+    this.vy = (ty-y) * rand(0.006, 0.012) - rand(4.6, 7.4);
+
+    this.life=0;
+    this.maxLife = rand(40, 78); // 允许飞久点确保到顶
+    this.color = randomColor();
+    this.mode = mode || 0; // 0普通 1金雨 2心形 3多段层层开花
+  }
+  Rocket.prototype.step = function(){
+    this.life++;
+    this.x += this.vx;
+    this.y += this.vy;
+    this.vx *= AIR_DRAG;
+    this.vy = this.vy * AIR_DRAG + GRAVITY;
+
+    drawPoint(this.x, this.y, this.color, 0.95, 1.55);
+
+    // ✅ 到达目标高度就爆（覆盖顶部空白最关键）
+    if (this.y <= this.ty || this.life >= this.maxLife || this.vy >= -0.18) {
+      explode(this.x, this.y, this.color, this.mode);
+      return false;
+    }
+    return true;
+  };
+
+  function Spark(x,y,vx,vy,color,size,life,kind){
+    this.x=x; this.y=y;
+    this.vx=vx; this.vy=vy;
+    this.c=color;
+    this.size=size;
+    this.life=0;
+    this.maxLife=life;
+    this.twinkle = Math.random() < 0.32;
+    this.seed = Math.random()*Math.PI*2;
+    this.kind = kind || 0; // 0普通 1金雨
+  }
+  Spark.prototype.step = function(){
+    this.life++;
+    this.x += this.vx;
+    this.y += this.vy;
+
+    var drag = (this.kind===1) ? 0.990 : SPARK_DRAG;
+    this.vx *= drag;
+    this.vy = this.vy * drag + GRAVITY * ((this.kind===1) ? 0.92 : 1.05);
+
+    var t = this.life / this.maxLife;
+    if (t >= 1) return false;
+
+    var alpha = 1 - t;
+    if (this.twinkle) {
+      alpha *= 0.55 + 0.45 * Math.sin(this.seed + this.life*0.38);
+      if (alpha < 0) alpha = 0;
+      if (alpha > 1) alpha = 1;
+    }
+
+    // 控亮，避免过曝
+    if (alpha > 0.90) alpha = 0.90;
+
+    drawPoint(this.x, this.y, this.c, alpha, this.size);
+    return true;
+  };
+
+  function drawPoint(x,y,c,a,r){
+    ctx.beginPath();
+    ctx.fillStyle = hslCss(c, a);
+    ctx.arc(x, y, r*DPR, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  function capSparks(){
+    if (sparks.length > MAX_SPARKS) {
+      sparks.splice(0, sparks.length - MAX_SPARKS);
+    }
+  }
+
+  /* ====== 爆炸形态：更壮观但不泛白 ====== */
+  function explode(x,y,baseColor,mode){
+    capSparks();
+
+    if (mode === 3) {
+      explodePeony(x,y,baseColor, 1.00);
+      setTimeout(function(){
+        explodeRing(x,y, (Math.random()<0.5?randomColor():baseColor), 3, 0.55);
+      }, 140);
+      setTimeout(function(){
+        explodeWillow(x,y);
+      }, 320);
+      if (Math.random() < 0.35) {
+        setTimeout(function(){ explodeHeart(x,y); }, 460);
+      }
+      return;
+    }
+    if (mode === 2) { explodeHeart(x,y); return; }
+    if (mode === 1) { explodeWillow(x,y); return; }
+
+    explodePeony(x,y,baseColor, 1.0);
+    if (Math.random() < 0.20) {
+      setTimeout(function(){
+        explodeRing(x,y, (Math.random()<0.55?randomColor():baseColor), 2, 0.55);
+      }, 140);
+    }
+  }
+
+  function explodePeony(x,y,baseColor,scale){
+    // “壮观”靠数量，但每个点控制大小/亮度
+    var count = (Math.random() < 0.25) ? rand(150, 220) : rand(120, 180);
+    count = Math.floor(count * (scale || 1));
+    var burst = rand(3.7, 5.6) * (scale || 1);
+
+    for (var i=0;i<count;i++){
+      var ang = Math.random()*Math.PI*2;
+      var speed = burst * Math.pow(Math.random(), 0.33) * rand(1.0, 1.35);
+      var vx = Math.cos(ang)*speed;
+      var vy = Math.sin(ang)*speed;
+
+      var c = (Math.random()<0.35)?randomColor():baseColor;
+      var size = rand(1.35, 2.15);
+      var life = rand(55, 90);
+
+      sparks.push(new Spark(x,y,vx,vy,c,size,life,0));
+    }
+  }
+
+  function explodeRing(x,y,c,rings,scale){
+    var R = rings || 2;
+    var sc = scale || 0.6;
+    for (var r=1;r<=R;r++){
+      var n = 70 + r*38;
+      var sp = (2.0 + r*1.0) * sc;
+      for (var i=0;i<n;i++){
+        var ang = (i/n)*Math.PI*2 + rand(-0.02, 0.02);
+        var speed = sp * rand(0.92, 1.12);
+        sparks.push(new Spark(x,y,Math.cos(ang)*speed,Math.sin(ang)*speed,c,rand(1.15,1.95),rand(50,80),0));
+      }
+    }
+  }
+
+  function explodeWillow(x,y){
+    var gold = { h: rand(42,58), s: rand(88,100), l: rand(50,64) };
+    var count = rand(120, 175);
+    var burst = rand(2.5, 3.9);
+    for (var i=0;i<count;i++){
+      var ang = Math.random()*Math.PI*2;
+      var speed = burst * Math.pow(Math.random(), 0.25) * rand(0.95, 1.25);
+      var vx = Math.cos(ang)*speed;
+      var vy = Math.sin(ang)*speed*0.85;
+      sparks.push(new Spark(x,y,vx,vy,gold,rand(1.15,1.95),rand(85,130),1));
+    }
+  }
+
+  function explodeHeart(x,y){
+    var heartColor = { h: rand(325,355), s: rand(90,100), l: rand(52,66) };
+    var n = 140;
+    var scale = rand(0.15, 0.20);
+
+    for (var i=0;i<n;i++){
+      var t = (i/n)*Math.PI*2;
+      var hx = 16*Math.pow(Math.sin(t),3);
+      var hy = 13*Math.cos(t) - 5*Math.cos(2*t) - 2*Math.cos(3*t) - Math.cos(4*t);
+      var vx = hx*scale*rand(0.95,1.05);
+      var vy = -hy*scale*rand(0.95,1.05);
+      sparks.push(new Spark(x,y,vx,vy,heartColor,rand(1.25,2.05),rand(70,110),0));
+    }
+  }
+
+  /* ====== 发射（默认更高） ====== */
+  function launch(tx, ty, mode){
+    var x = rand(W*0.10, W*0.90);
+    var y = H - 4;
+    if (typeof tx !== 'number') tx = rand(W*0.10, W*0.90);
+
+    // ✅ 关键：默认爆点用顶部偏向分布
+    if (typeof ty !== 'number') ty = chooseTy();
+
+    rockets.push(new Rocket(x,y,tx,ty,mode||0));
+  }
+
+  function fanLaunch(n, centerX, spread, tyMin, tyMax, mode){
+    var cx = (typeof centerX==='number') ? centerX : rand(W*0.25, W*0.75);
+    var sp = (typeof spread==='number') ? spread : rand(W*0.25, W*0.55);
+    var count = n || 6;
+
+    // ✅ 默认齐射高度更高：直接覆盖顶部
+    var dMin = (typeof tyMin === 'number') ? tyMin : (H * 0.02);
+    var dMax = (typeof tyMax === 'number') ? tyMax : (H * 0.18);
+
+    for (var i=0;i<count;i++){
+      var t = (count===1) ? 0 : (i/(count-1) - 0.5);
+      var tx = cx + t*sp;
+      var ty = rand(dMin, dMax);
+      launch(tx, ty, mode||0);
+    }
+  }
+
+  /* ====== 编排时间轴：确保顶部持续有烟花 ====== */
+  var cues = [];
+  function at(ms, fn){ cues.push({t:ms, fn:fn, done:false}); }
+
+  function buildCues(){
+    cues = [];
+
+    // 开场：直接高空齐射铺顶
+    at(0,    function(){ fanLaunch(7, W*0.50, W*0.95, H*0.02, H*0.14, 3); });
+    at(280,  function(){ fanLaunch(6, W*0.50, W*0.90, H*0.03, H*0.16, 0); });
+    at(560,  function(){ fanLaunch(5, W*0.25, W*0.60, H*0.04, H*0.18, 0); });
+    at(820,  function(){ fanLaunch(5, W*0.75, W*0.60, H*0.04, H*0.18, 0); });
+
+    // 中段：多段 + 金雨（仍然偏高）
+    at(1500, function(){ fanLaunch(8, W*0.50, W*1.05, H*0.03, H*0.18, 3); });
+    at(2200, function(){ fanLaunch(6, W*0.50, W*0.95, H*0.04, H*0.20, 1); });
+    at(2850, function(){ fanLaunch(7, W*0.50, W*0.95, H*0.03, H*0.18, 0); });
+
+    // 浪漫段：心形也打到更高空
+    at(3600, function(){ fanLaunch(3, W*0.30, W*0.30, H*0.06, H*0.22, 2); });
+    at(3950, function(){ fanLaunch(3, W*0.70, W*0.30, H*0.06, H*0.22, 2); });
+    at(4300, function(){ fanLaunch(7, W*0.50, W*0.95, H*0.03, H*0.18, 3); });
+
+    // 终章前：顶部金雨铺满
+    at(5600, function(){ fanLaunch(8, W*0.50, W*1.10, H*0.02, H*0.16, 1); });
+    at(6300, function(){ fanLaunch(8, W*0.50, W*1.10, H*0.02, H*0.16, 3); });
+
+    // 终章：高空密集齐射（数量适中避免白团）
+    at(8200, function(){ fanLaunch(9, W*0.50, W*1.25, H*0.02, H*0.14, 3); });
+    at(8600, function(){ fanLaunch(9, W*0.50, W*1.25, H*0.02, H*0.14, 1); });
+    at(9000, function(){ fanLaunch(9, W*0.50, W*1.25, H*0.02, H*0.14, 3); });
+    at(9400, function(){ fanLaunch(7, W*0.50, W*0.95, H*0.04, H*0.18, 2); });
+  }
+  buildCues();
+
+  /* ====== 弹幕（不糊屏，速度适中） ====== */
+  var danmakuTimer = null;
+  function startDanmaku(){
+    if (danmakuTimer) return;
+
+    // 稍微压暗背景，让字更清晰
+    ctx.fillStyle = 'rgba(0,0,0,0.60)';
+    ctx.fillRect(0,0,W,H);
+
+    var baseFont = Math.max(18, Math.min(30, Math.floor(window.innerWidth/18)));
+    var lanes = 10;
+    var lane = 0;
+
+    function spawnOne(){
+      var el = document.createElement('div');
+      el.className = 'dm';
+      el.textContent = MESSAGE;
+
+      lane = (lane + 1) % lanes;
+      var y = Math.floor((lane + 0.5) * (window.innerHeight / lanes)) + Math.floor(rand(-10,10));
+
+      var size = baseFont + rand(-1, 7);
+      var hue = rand(330, 360);
+      var dur = rand(6.5, 9.5);
+      var wobble = rand(-3, 3);
+
+      el.style.top = y + 'px';
+      el.style.fontSize = size + 'px';
+      el.style.color = 'hsla(' + hue + ',95%,72%,0.94)';
+
+      danmaku.appendChild(el);
+
+      var w = el.getBoundingClientRect().width;
+      var totalX = window.innerWidth + w + 160;
+      var start = nowMs();
+
+      function tick(tn){
+        var t = (tn - start) / (dur*1000);
+        if (t >= 1) { if (el && el.parentNode) el.parentNode.removeChild(el); return; }
+        var x = -totalX * t;
+        var drift = 7 * Math.sin(t*Math.PI*2 + wobble);
+        el.style.transform = 'translateX(' + x + 'px) rotate(' + wobble + 'deg) translateY(' + drift + 'px)';
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+    }
+
+    for (var i=0;i<12;i++){
+      (function(ii){ setTimeout(function(){ spawnOne(); }, ii*160); })(i);
+    }
+
+    var startAt = nowMs();
+    danmakuTimer = setInterval(function(){
+      if (nowMs() - startAt > 10000) { clearInterval(danmakuTimer); danmakuTimer = null; return; }
+      spawnOne();
+    }, 340);
+  }
+
+  /* ====== 主循环 ====== */
+  var startTime = nowMs();
+  var ended = false;
+
+  function reset(){
+    rockets.length = 0;
+    sparks.length = 0;
+    danmaku.innerHTML = '';
+    if (danmakuTimer) { clearInterval(danmakuTimer); danmakuTimer = null; }
+
+    for (var i=0;i<cues.length;i++) cues[i].done = false;
+
+    ended = false;
+    startTime = nowMs();
+    hint.classList.remove('hide');
+
+    ctx.fillStyle = 'rgb(0,0,0)';
+    ctx.fillRect(0,0,W,H);
+
+    // 重来直接铺顶
+    fanLaunch(8, W*0.50, W*1.05, H*0.02, H*0.16, 3);
+  }
+
+  function frame(){
+    // 拖尾背景（干净、不泛光）
+    ctx.fillStyle = 'rgba(0,0,0,' + TRAIL_ALPHA + ')';
+    ctx.fillRect(0,0,W,H);
+
+    var t = nowMs() - startTime;
+
+    // 编排
+    for (var i=0;i<cues.length;i++){
+      if (!cues[i].done && t >= cues[i].t){
+        cues[i].done = true;
+        cues[i].fn();
+      }
+    }
+
+    // 随机补充（用 chooseTy 强偏向顶部，填满上方空白）
+    if (!ended && t < SHOW_MS){
+      if (Math.random() < AUTO_RATE){
+        var r = Math.random();
+        var mode = (r < 0.18) ? 3 : (r < 0.32 ? 1 : (r < 0.42 ? 2 : 0));
+        launch(null, chooseTy(), mode);
+      }
+    }
+
+    // 终章 + 快速弹幕
+    if (!ended && t >= SHOW_MS){
+      ended = true;
+      hint.classList.add('hide');
+
+      var endStart = nowMs();
+      (function finaleLoop(){
+        var e = nowMs() - endStart;
+        if (e < FINALE_MS){
+          // 终章连发：更慢一点，不会“射太快”
+          fanLaunch(6, rand(W*0.25, W*0.75), rand(W*0.70, W*1.10), H*0.02, H*0.14, (Math.random()<0.6?3:1));
+          setTimeout(finaleLoop, 260);
+        } else {
+          setTimeout(function(){ startDanmaku(); }, DANMAKU_DELAY_MS);
+        }
+      })();
+    }
+
+    // 更新火箭/火花
+    for (var ri=rockets.length-1; ri>=0; ri--){
+      if (!rockets[ri].step()) rockets.splice(ri,1);
+    }
+    for (var si=sparks.length-1; si>=0; si--){
+      if (!sparks[si].step()) sparks.splice(si,1);
+    }
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  /* ====== 交互：点击也能打到顶部 ====== */
+  function pointerPos(ev){
+    var rect = canvas.getBoundingClientRect();
+    return { x:(ev.clientX-rect.left)*DPR, y:(ev.clientY-rect.top)*DPR };
+  }
+
+  function clickBurst(x,y){
+    // 点击：强制更高的爆点范围，专门补顶部
+    var ty = Math.max(H*0.02, Math.min(H*0.30, y - rand(240, 360)*DPR));
+    fanLaunch(7, x, W*0.90, Math.max(H*0.02, ty - H*0.10), Math.min(H*0.20, ty + H*0.06), 3);
+  }
+
+  var lastTap = 0;
+  window.addEventListener('pointerdown', function(ev){
+    hint.classList.add('hide');
+    var p = pointerPos(ev);
+    clickBurst(p.x, p.y);
+
+    var nt = nowMs();
+    if (nt - lastTap < 320) reset();
+    lastTap = nt;
+  }, {passive:true});
+
+  var pressTimer = null;
+  window.addEventListener('touchstart', function(){
+    pressTimer = setTimeout(function(){ reset(); }, 800);
+  }, {passive:true});
+  window.addEventListener('touchend', function(){
+    if (pressTimer) clearTimeout(pressTimer);
+    pressTimer = null;
+  }, {passive:true});
+
+})();
+</script>
+</body>
+</html>
